@@ -63,10 +63,11 @@ jobs:
               --allow-unauthenticated \
               --set-env-vars="ENVIRONMENT_NAME=${{ secrets.ENVIRONMENT_NAME }}"
           else
-            # 1. Capturar la revisión anterior
-            PREVIOUS_REV=$(gcloud run services describe "$SERVICE_NAME" --region ${{ env.GCP_REGION }} --format="value(status.latestReadyRevisionName)")
+            # 1. SOLUCIÓN: Identificar la revisión estable REAL (la que tiene el mayor porcentaje de tráfico actualmente)
+            PREVIOUS_REV=$(gcloud run services describe "$SERVICE_NAME" --region ${{ env.GCP_REGION }} --format="csv[no-heading](status.traffic.percent, status.traffic.revisionName)" | sort -nr | head -n 1 | cut -d',' -f2)
+            echo "La versión estable actual es: $PREVIOUS_REV"
 
-            # 2. Desplegar sin tráfico
+            # 2. Desplegar la nueva imagen sin tráfico
             gcloud run deploy "$SERVICE_NAME" \
               --image "$IMAGE_TAG" \
               --region ${{ env.GCP_REGION }} \
@@ -75,10 +76,11 @@ jobs:
               --no-traffic \
               --set-env-vars="ENVIRONMENT_NAME=${{ secrets.ENVIRONMENT_NAME }}"
             
-            # 3. Capturar nueva revisión
+            # 3. Capturar el nombre de la NUEVA revisión Canary recién creada
             CANARY_REV=$(gcloud run services describe "$SERVICE_NAME" --region ${{ env.GCP_REGION }} --format="value(status.latestCreatedRevisionName)")
             
-            # 4. Aplicar 90% / 10%
+            # 4. Aplicar el tráfico dinámicamente (90% a la estable real, 10% a la nueva)
+            echo "Asignando 90% a $PREVIOUS_REV y 10% a $CANARY_REV"
             gcloud run services update-traffic "$SERVICE_NAME" \
               --region ${{ env.GCP_REGION }} \
               --to-revisions="$PREVIOUS_REV=90,$CANARY_REV=10"
@@ -112,12 +114,10 @@ jobs:
             --to-revisions="$CANARY_REV=100"
 
   # 3. JOB AUTOMÁTICO EN CASO DE RECHAZO O FALLO (ROLLBACK)
-# 3. JOB AUTOMÁTICO EN CASO DE RECHAZO O FALLO (ROLLBACK)
-# 3. JOB AUTOMÁTICO EN CASO DE RECHAZO O FALLO (ROLLBACK)
   rollback_canary:
     needs: [build_and_canary, promote_or_rollback]
     if: always() && needs.build_and_canary.outputs.is_first_deploy == 'false' && (needs.promote_or_rollback.result == 'failure' || needs.promote_or_rollback.result == 'cancelled')
-    environment: dev # <--- ¡ESTA ES LA LÍNEA MÁGICA QUE FALTABA!
+    environment: dev
     runs-on: ubuntu-latest
     steps:
       - name: Google Auth
@@ -132,16 +132,10 @@ jobs:
         run: |
           SERVICE_NAME="gemini-angular-${{ secrets.ALUMNO_ID }}-${{ secrets.ENVIRONMENT_NAME }}"
           
-          # Obtenemos la revisión Canary para filtrarla
-          CANARY_REV=$(gcloud run services describe "$SERVICE_NAME" --region ${{ env.GCP_REGION }} --format="value(status.latestCreatedRevisionName)")
+          # SOLUCIÓN: Usamos la misma lógica para encontrar la versión que tiene el 90% (nuestra versión estable)
+          STABLE_REV=$(gcloud run services describe "$SERVICE_NAME" --region ${{ env.GCP_REGION }} --format="csv[no-heading](status.traffic.percent, status.traffic.revisionName)" | sort -nr | head -n 1 | cut -d',' -f2)
           
-          # Obtenemos todas las revisiones que actualmente tienen tráfico
-          TRAFFIC_REVS=$(gcloud run services describe "$SERVICE_NAME" --region ${{ env.GCP_REGION }} --format="value(status.traffic.revisionName)")
-          
-          # Filtramos la revisión Canary para quedarnos SOLO con el nombre de la versión estable
-          STABLE_REV=$(echo $TRAFFIC_REVS | tr ';' ' ' | tr ',' ' ' | sed "s/$CANARY_REV//g" | awk '{print $1}')
-          
-          echo "El despliegue fue rechazado o cancelado. Revirtiendo el 100% a la versión estable: $STABLE_REV"
+          echo "El despliegue fue rechazado o cancelado. Revirtiendo el 100% a la versión estable segura: $STABLE_REV"
           gcloud run services update-traffic "$SERVICE_NAME" \
             --region ${{ env.GCP_REGION }} \
             --to-revisions="$STABLE_REV=100"
