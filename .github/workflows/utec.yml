@@ -112,9 +112,11 @@ jobs:
             --to-revisions="$CANARY_REV=100"
 
   # 3. JOB AUTOMÁTICO EN CASO DE RECHAZO O FALLO (ROLLBACK)
+# 3. JOB AUTOMÁTICO EN CASO DE RECHAZO O FALLO (ROLLBACK)
   rollback_canary:
     needs: [build_and_canary, promote_or_rollback]
-    if: always() && needs.build_and_canary.outputs.is_first_deploy == 'false' && (needs.promote_or_rollback.result == 'denied' || needs.promote_or_rollback.result == 'failed')
+    # CORRECCIÓN AQUÍ: Usamos 'failure' y 'cancelled' que son los estados oficiales de GitHub Actions
+    if: always() && needs.build_and_canary.outputs.is_first_deploy == 'false' && (needs.promote_or_rollback.result == 'failure' || needs.promote_or_rollback.result == 'cancelled')
     runs-on: ubuntu-latest
     steps:
       - name: Google Auth
@@ -132,14 +134,13 @@ jobs:
           # Obtenemos la revisión Canary para filtrarla
           CANARY_REV=$(gcloud run services describe "$SERVICE_NAME" --region ${{ env.GCP_REGION }} --format="value(status.latestCreatedRevisionName)")
           
-          # Obtenemos todas las revisiones que actualmente tienen tráfico (devolverá la estable y la canary juntas)
+          # Obtenemos todas las revisiones que actualmente tienen tráfico
           TRAFFIC_REVS=$(gcloud run services describe "$SERVICE_NAME" --region ${{ env.GCP_REGION }} --format="value(status.traffic.revisionName)")
           
           # Filtramos la revisión Canary para quedarnos SOLO con el nombre de la versión estable
           STABLE_REV=$(echo $TRAFFIC_REVS | tr ';' ' ' | tr ',' ' ' | sed "s/$CANARY_REV//g" | awk '{print $1}')
           
-          echo "El despliegue falló/fue cancelado. Revirtiendo el 100% a la versión estable: $STABLE_REV"
+          echo "El despliegue fue rechazado o cancelado. Revirtiendo el 100% a la versión estable: $STABLE_REV"
           gcloud run services update-traffic "$SERVICE_NAME" \
             --region ${{ env.GCP_REGION }} \
             --to-revisions="$STABLE_REV=100"
-            
